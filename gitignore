@@ -1,0 +1,6 @@
+baseline.json
+fim.log
+email.json
+__pycache__/
+*.pyc
+.env
