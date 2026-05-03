@@ -28,7 +28,7 @@ The tool operates in three stages. First, you create a baseline. It walks the ta
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/file-integrity-monitor.git
+git clone https://github.com/SaihanLob/file-integrity-monitor.git
 cd file-integrity-monitor
 pip install -r requirements.txt
 ```
