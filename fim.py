@@ -76,6 +76,7 @@ def create_baseline(directory: str, baseline_file: str, logger: logging.Logger) 
     directory = os.path.abspath(directory)
 
     logger.info(f"Creating baseline for: {directory}")
+    unreadable = []
 
     for root, _, files in os.walk(directory):
         for fname in files:
@@ -87,6 +88,13 @@ def create_baseline(directory: str, baseline_file: str, logger: logging.Logger) 
                     "size": os.path.getsize(fpath),
                     "modified": os.path.getmtime(fpath)
                 }
+            else:
+                unreadable.append(fpath)
+
+    # Files that cannot be read are not protected by the baseline, so say so
+    # rather than leaving the user to assume everything is being monitored.
+    for fpath in unreadable:
+        logger.warning(f"[NOT MONITORED] Could not read, so not in baseline: {fpath}")
 
     meta = {
         "created_at": datetime.now().isoformat(),
@@ -136,7 +144,7 @@ def send_email_alert(changes: list, config: dict, logger: logging.Logger):
         body_lines.append(f"  [{change['type'].upper()}] {change['path']}")
         if "expected_hash" in change:
             body_lines.append(f"      Expected : {change['expected_hash']}")
-            body_lines.append(f"      Got      : {change['actual_hash']}")
+            body_lines.append(f"      Got      : {change.get('actual_hash') or 'file could not be read'}")
         body_lines.append("")
 
     body = "\n".join(body_lines)
@@ -157,11 +165,42 @@ def send_email_alert(changes: list, config: dict, logger: logging.Logger):
 
 #  CORE SCAN LOGIC
 
-def scan(directory: str, baseline: dict, logger: logging.Logger, email_config: dict) -> list:
-    """Compare current state against baseline. Return list of changes."""
+def change_key(change: dict) -> tuple:
+    """Identify a change so the same change is not alerted on twice in watch mode.
+    Includes the new hash, so a file that changes again triggers a fresh alert."""
+    return (change["type"], change["path"], change.get("actual_hash"))
+
+
+def log_change(change: dict, logger: logging.Logger):
+    labels = {
+        "new":        "[NEW FILE]   ",
+        "modified":   "[MODIFIED]   ",
+        "deleted":    "[DELETED]    ",
+        "unreadable": "[UNREADABLE] ",
+    }
+    logger.warning(f"{labels[change['type']]}  {change['path']}")
+    if change["type"] == "modified":
+        logger.warning(f"  Expected hash : {change['expected_hash']}")
+        logger.warning(f"  Actual hash   : {change['actual_hash']}")
+    elif change["type"] == "unreadable":
+        logger.warning("  File can no longer be read. Its contents cannot be verified, "
+                       "which is what an attacker hiding a change would want.")
+    elif change["type"] == "new" and change.get("actual_hash") is None:
+        logger.warning("  New file cannot be read, so its contents are unknown.")
+
+
+def scan(directory: str, baseline: dict, logger: logging.Logger, email_config: dict,
+         already_reported: set | None = None) -> list:
+    """Compare current state against baseline and return every change found.
+
+    Alerts (log warnings, desktop notification, email) are sent only for changes
+    not in `already_reported`. Watch mode passes in the changes from the previous
+    scan, so a change is alerted on once rather than every interval.
+    """
     changes = []
     directory = os.path.abspath(directory)
     current_files = set()
+    already_reported = already_reported or set()
 
     for root, _, files in os.walk(directory):
         for fname in files:
@@ -169,39 +208,45 @@ def scan(directory: str, baseline: dict, logger: logging.Logger, email_config: d
             current_files.add(fpath)
             current_hash = hash_file(fpath)
 
-            if current_hash is None:
-                continue
-
             if fpath not in baseline:
-                change = {"type": "new", "path": fpath}
-                changes.append(change)
-                logger.warning(f"[NEW FILE]      {fpath}")
+                # A new file is reported even if it cannot be read
+                changes.append({"type": "new", "path": fpath, "actual_hash": current_hash})
+
+            elif current_hash is None:
+                # Previously this was skipped silently, so making a file unreadable
+                # (for example with chmod 000) hid any change to it.
+                changes.append({
+                    "type": "unreadable",
+                    "path": fpath,
+                    "expected_hash": baseline[fpath]["hash"],
+                })
 
             elif baseline[fpath]["hash"] != current_hash:
-                change = {
+                changes.append({
                     "type": "modified",
                     "path": fpath,
                     "expected_hash": baseline[fpath]["hash"],
                     "actual_hash": current_hash
-                }
-                changes.append(change)
-                logger.warning(f"[MODIFIED]      {fpath}")
-                logger.warning(f"  Expected hash : {baseline[fpath]['hash']}")
-                logger.warning(f"  Actual hash   : {current_hash}")
+                })
 
     # Check for deleted files
     for fpath in baseline:
         if fpath not in current_files:
-            change = {"type": "deleted", "path": fpath}
-            changes.append(change)
-            logger.warning(f"[DELETED]       {fpath}")
+            changes.append({"type": "deleted", "path": fpath})
 
-    if changes:
-        summary = f"{len(changes)} change(s) detected in {directory}"
+    new_changes = [c for c in changes if change_key(c) not in already_reported]
+
+    for change in new_changes:
+        log_change(change, logger)
+
+    if new_changes:
+        summary = f"{len(new_changes)} new change(s) detected in {directory}"
         logger.warning(summary)
 
         send_desktop_notification("⚠️ FIM Alert", summary)
-        send_email_alert(changes, email_config, logger)
+        send_email_alert(new_changes, email_config, logger)
+    elif changes:
+        logger.info(f"No new changes in {directory} ({len(changes)} already reported)")
     else:
         logger.info(f"No changes detected in {directory}")
 
@@ -285,10 +330,14 @@ Examples:
             sys.exit(1)
         email_cfg = load_email_config(args.email_config)
         logger.info(f"Watching '{args.directory}' every {args.interval}s. Press Ctrl+C to stop.")
+        reported = set()
         try:
             while True:
                 baseline = load_baseline(args.baseline_file)
-                scan(args.directory, baseline, logger, email_cfg)
+                changes = scan(args.directory, baseline, logger, email_cfg, reported)
+                # Remember what is currently changed. If a file is restored, it drops
+                # out of this set, so a later change to it will alert again.
+                reported = {change_key(c) for c in changes}
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             logger.info("FIM stopped by user.")

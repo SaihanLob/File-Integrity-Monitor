@@ -7,12 +7,12 @@ This was built as a blue team and SOC learning project, with the goal of underst
 ## Features
 
 - SHA-256 file hashing (industry standard)
-- Detects new, modified, and deleted files
+- Detects new, modified, deleted, and unreadable files (making a file unreadable is a way to hide a change, so it is reported rather than skipped)
 - Persistent JSON baseline for audit trails
 - Timestamped log file output
 - Desktop notifications on Windows, Linux, and macOS via `plyer`
 - Email alerts via SMTP (compatible with Gmail)
-- Continuous watch mode with a configurable scan interval
+- Continuous watch mode with a configurable scan interval, alerting once per change rather than on every scan
 - Cross-platform support: Windows and Linux
 
 ## How It Works
@@ -59,6 +59,8 @@ python fim.py watch /path/to/monitor --interval 30
 
 Runs a scan every 30 seconds and keeps going until you press `Ctrl+C`. Useful if you want to leave it running in the background during a session.
 
+Each change is alerted on once. Later scans that find the same change log it as already reported instead of sending another notification or email. If the file changes again, or is restored and then changed later, a new alert is sent.
+
 ### 4. Enable Email Alerts
 
 Copy the example config and fill in your credentials:
@@ -84,7 +86,8 @@ Every event is written to both the terminal and `fim.log` with a timestamp, so y
 [2024-01-15 10:31:05] [WARNING]   Expected hash : a3f1e9...
 [2024-01-15 10:31:05] [WARNING]   Actual hash   : d7c2b1...
 [2024-01-15 10:31:05] [WARNING] [DELETED]       /monitored/important.db
-[2024-01-15 10:31:05] [WARNING] 3 change(s) detected in /monitored
+[2024-01-15 10:31:05] [WARNING] [UNREADABLE]    /monitored/app.conf
+[2024-01-15 10:31:05] [WARNING] 4 new change(s) detected in /monitored
 ```
 
 ### Baseline JSON (`baseline.json`)
