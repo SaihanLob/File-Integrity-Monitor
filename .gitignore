@@ -4,3 +4,5 @@ email.json
 __pycache__/
 *.pyc
 .env
+*.key
+.pytest_cache/
